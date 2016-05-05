@@ -143,16 +143,18 @@ pub fn main() {
 
 
     let view: AffineMatrix3<f32> = Transform::look_at(
-        Point3::new(1.5f32, -5.0, 3.0),
+        Point3::new(11.5f32, -15.0, 13.0),
         Point3::new(0f32, 0.0, 0.0),
         Vector3::unit_z(),
     );
-    let proj = cgmath::perspective(cgmath::deg(45.0f32), 4.0/3.0, 1.0, 10.0);
+    let proj = cgmath::perspective(cgmath::deg(45.0f32), 4.0/3.0, 1.0, 100.0);
+
+    let proview = proj * view.mat;
 
     // data pipeline
     let data = pipe::Data {
         vbuf: vbuf,
-        transform: (proj * view.mat).into(),
+        transform: proview.into(),
         locals: factory.create_constant_buffer(1),
         color: (texture_view, factory.create_sampler(sinfo)),
         out_color: main_color,
@@ -181,15 +183,21 @@ pub fn main() {
         w.register::<Pos>();
         w.register::<MoveTo>();
 
-        w.create_now()
-            .with(Pos(Vec3f::new(1.0, 1.0, 1.0)))
-            .with(MoveTo(Vec3f::new(0.0, 0.0, 0.0), 0.1))
-            .build();
-
-        w.create_now()
-            .with(Pos(Vec3f::new(0.0, 5.0, 0.0)))
-            .with(MoveTo(Vec3f::new(0.0, 0.0, 0.0), 0.1))
-            .build();
+        let y_max = 10;
+        let x_max = 10;
+        let gap = 0.0;
+        for y in 0..y_max {
+            for x in 0..x_max {
+                w.create_now()
+                .with(Pos(Vec3f::new(0.0, 0.0, 0.0)))
+                .with(MoveTo(Vec3f::new(
+                    ((x as f32) - ((x_max - 1) as f32) / 2.0) * (2.0 + gap),
+                    ((y as f32) - ((y_max - 1) as f32) / 2.0) * (2.0 + gap),
+                    1.0,
+                ), 0.05))
+                .build();
+            }
+        }
 
         specs::Planner::<()>::new(w, 4)
     };
@@ -224,14 +232,15 @@ pub fn main() {
     let (main_side, render_side) = encoder_channel();
 
     // seed render loop with two encoders
-    main_side.tx.send(factory.create_command_buffer().into());
-    main_side.tx.send(factory.create_command_buffer().into());
+    main_side.tx.send(factory.create_command_buffer().into()).unwrap();
+    main_side.tx.send(factory.create_command_buffer().into()).unwrap();
 
     struct Render {
         encoder: EncoderChannel,
         data: pipe::Data<gfx_device_gl::Resources>,
         slice: gfx::Slice<gfx_device_gl::Resources>,
         pso: gfx::PipelineState<gfx_device_gl::Resources, pipe::Meta>,
+        proview: cgmath::Matrix4<f32>,
     }
     impl specs::System<()> for Render {
         fn run(&mut self, arg: RunArg, _: ()) {
@@ -241,23 +250,30 @@ pub fn main() {
 
             let mut encoder = self.encoder.rx.recv().unwrap();
 
-            let locals = Locals { transform: self.data.transform };
             encoder.clear(&self.data.out_color, CLEAR_COLOR);
             encoder.clear_depth(&self.data.out_depth, 1.0);
 
-
-            println!("Start");
+            //println!("Start");
             // Insert a component for each entity in sb
             for (eid, pos) in (&entities, &poss).iter() {
-                println!("Render {:?} {:?}", eid, pos);
+                //println!("Render {:?} {:?}", eid, pos);
+
+                use cgmath::Matrix4;
+
+                let m: Matrix4<_> = self.proview;
+                let m = m * Matrix4::from_translation(pos.0);
+
+                let locals = Locals {
+                    transform: m.into()
+                };
+                self.data.transform = m.into();
+                encoder.update_constant_buffer(&self.data.locals, &locals);
+                encoder.draw(&self.slice, &self.pso, &self.data);
             }
-            println!("End");
+            //println!("End");
 
 
-            encoder.update_constant_buffer(&self.data.locals, &locals);
-            encoder.draw(&self.slice, &self.pso, &self.data);
-
-            self.encoder.tx.send(encoder);
+            self.encoder.tx.send(encoder).unwrap();
         }
     }
 
@@ -271,7 +287,7 @@ pub fn main() {
             for (eid, a, b) in (&entities, &mut poss, &move_tos).iter() {
                 use cgmath::InnerSpace;
 
-                println!("Entity @{:?}", a.0);
+                //println!("Entity @{:?}", a.0);
 
                 let distance = (a.0 - b.0).magnitude().abs();
                 let new_distance = (distance - b.1).max(0.0);
@@ -282,7 +298,7 @@ pub fn main() {
                 };
 
                 a.0 = b.0.lerp(a.0, f);
-                println!("-> Entity @{:?}", a.0);
+                //println!("-> Entity @{:?}", a.0);
             }
         }
     }
@@ -292,6 +308,7 @@ pub fn main() {
         data: data,
         slice: slice,
         pso: pso,
+        proview: proview,
     }, "render", 10);
     planner.add_system(Mover, "mover", 20);
 
@@ -320,6 +337,6 @@ pub fn main() {
         window.swap_buffers().unwrap();
         device.cleanup();
 
-        main_side.tx.send(encoder);
+        main_side.tx.send(encoder).unwrap();
     }
 }
