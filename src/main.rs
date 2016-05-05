@@ -132,7 +132,7 @@ pub fn main() {
     // vertex buffer
     let (vbuf, slice) = factory.create_vertex_buffer_with_slice(&vertex_data, index_data);
 
-    let texels = [[0x20, 0xA0, 0xC0, 0x00]];
+    let texels = [[0x20, 0x60, 0x30, 0x00]];
     let (_, texture_view) = factory.create_texture_const::<gfx::format::Rgba8>(
         gfx::tex::Kind::D2(1, 1, gfx::tex::AaMode::Single), &[&texels]
         ).unwrap();
