@@ -18,6 +18,9 @@ extern crate gfx_window_glutin;
 extern crate gfx_device_gl;
 extern crate glutin;
 extern crate cgmath;
+extern crate specs;
+
+use specs::Join;
 
 use gfx::traits::FactoryExt;
 use gfx::Factory;
@@ -74,11 +77,8 @@ pub fn main() {
         .with_vsync();
 
     // Window init
-    let (window, mut device, mut factory, main_color, _main_depth) =
+    let (window, mut device, mut factory, main_color, main_depth) =
         gfx_window_glutin::init::<ColorFormat, DepthFormat>(builder);
-
-    // gfx command encoder
-    let mut encoder: gfx::Encoder<_, _> = factory.create_command_buffer().into();
 
     // shader pipeline
     let pso = factory.create_pipeline_simple(
@@ -156,8 +156,144 @@ pub fn main() {
         locals: factory.create_constant_buffer(1),
         color: (texture_view, factory.create_sampler(sinfo)),
         out_color: main_color,
-        out_depth: _main_depth,
+        out_depth: main_depth,
     };
+
+    // ECS
+
+    type Vec3f = cgmath::Vector3<f32>;
+
+    #[derive(Clone, Debug)]
+    struct Pos(Vec3f);
+    impl specs::Component for Pos {
+        type Storage = specs::VecStorage<Pos>;
+    }
+
+    #[derive(Clone, Debug)]
+    struct MoveTo(Vec3f, f32);
+    impl specs::Component for MoveTo {
+        type Storage = specs::VecStorage<MoveTo>;
+    }
+
+    let mut planner = {
+        let mut w = specs::World::new();
+
+        w.register::<Pos>();
+        w.register::<MoveTo>();
+
+        w.create_now()
+            .with(Pos(Vec3f::new(1.0, 1.0, 1.0)))
+            .with(MoveTo(Vec3f::new(0.0, 0.0, 0.0), 0.1))
+            .build();
+
+        w.create_now()
+            .with(Pos(Vec3f::new(0.0, 5.0, 0.0)))
+            .with(MoveTo(Vec3f::new(0.0, 0.0, 0.0), 0.1))
+            .build();
+
+        specs::Planner::<()>::new(w, 4)
+    };
+
+    use specs::RunArg;
+
+    use std::sync::mpsc::SyncSender;
+    use std::sync::mpsc::Receiver;
+    use std::sync::mpsc::sync_channel;
+
+    type Encoder = gfx::Encoder<
+        gfx_device_gl::Resources,
+        gfx_device_gl::CommandBuffer>;
+
+    struct EncoderChannel {
+        tx: SyncSender<Encoder>,
+        rx: Receiver<Encoder>,
+    }
+
+    fn encoder_channel() -> (EncoderChannel, EncoderChannel) {
+        let (tx1, rx1) = sync_channel(2);
+        let (tx2, rx2) = sync_channel(2);
+        (EncoderChannel {
+            tx: tx1,
+            rx: rx2,
+        }, EncoderChannel {
+            tx: tx2,
+            rx: rx1,
+        })
+    }
+
+    let (main_side, render_side) = encoder_channel();
+
+    // seed render loop with two encoders
+    main_side.tx.send(factory.create_command_buffer().into());
+    main_side.tx.send(factory.create_command_buffer().into());
+
+    struct Render {
+        encoder: EncoderChannel,
+        data: pipe::Data<gfx_device_gl::Resources>,
+        slice: gfx::Slice<gfx_device_gl::Resources>,
+        pso: gfx::PipelineState<gfx_device_gl::Resources, pipe::Meta>,
+    }
+    impl specs::System<()> for Render {
+        fn run(&mut self, arg: RunArg, _: ()) {
+            let (poss, entities) = arg.fetch(|w| {
+                (w.read::<Pos>(), w.entities())
+            });
+
+            let mut encoder = self.encoder.rx.recv().unwrap();
+
+            let locals = Locals { transform: self.data.transform };
+            encoder.clear(&self.data.out_color, CLEAR_COLOR);
+            encoder.clear_depth(&self.data.out_depth, 1.0);
+
+
+            println!("Start");
+            // Insert a component for each entity in sb
+            for (eid, pos) in (&entities, &poss).iter() {
+                println!("Render {:?} {:?}", eid, pos);
+            }
+            println!("End");
+
+
+            encoder.update_constant_buffer(&self.data.locals, &locals);
+            encoder.draw(&self.slice, &self.pso, &self.data);
+
+            self.encoder.tx.send(encoder);
+        }
+    }
+
+    struct Mover;
+    impl specs::System<()> for Mover {
+        fn run(&mut self, arg: RunArg, _: ()) {
+            let (mut poss, move_tos, entities) = arg.fetch(|w| {
+                (w.write::<Pos>(), w.read::<MoveTo>(), w.entities())
+            });
+
+            for (eid, a, b) in (&entities, &mut poss, &move_tos).iter() {
+                use cgmath::InnerSpace;
+
+                println!("Entity @{:?}", a.0);
+
+                let distance = (a.0 - b.0).magnitude().abs();
+                let new_distance = (distance - b.1).max(0.0);
+                let f = if distance > 0.0 {
+                    new_distance / distance
+                } else {
+                    0.0
+                };
+
+                a.0 = b.0.lerp(a.0, f);
+                println!("-> Entity @{:?}", a.0);
+            }
+        }
+    }
+
+    planner.add_system(Render {
+        encoder: render_side,
+        data: data,
+        slice: slice,
+        pso: pso,
+    }, "render", 10);
+    planner.add_system(Mover, "mover", 20);
 
     // main loop
     'main: loop {
@@ -173,14 +309,17 @@ pub fn main() {
                 _ => {},
             }
         }
-        // draw a frame
-        let locals = Locals { transform: data.transform };
-        encoder.update_constant_buffer(&data.locals, &locals);
-        encoder.clear(&data.out_color, CLEAR_COLOR);
-        encoder.clear_depth(&data.out_depth, 1.0);
-        encoder.draw(&slice, &pso, &data);
+
+        // logic & render
+        planner.dispatch(());
+        planner.wait();
+
+        let mut encoder = main_side.rx.recv().unwrap();
+
         encoder.flush(&mut device);
         window.swap_buffers().unwrap();
         device.cleanup();
+
+        main_side.tx.send(encoder);
     }
 }
