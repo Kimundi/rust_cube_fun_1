@@ -19,6 +19,7 @@ extern crate gfx_device_gl;
 extern crate glutin;
 extern crate cgmath;
 extern crate specs;
+extern crate chrono;
 
 use specs::Join;
 
@@ -39,6 +40,10 @@ gfx_defines!{
         tex_coord: [i8; 2] = "a_TexCoord",
     }
 
+    vertex Instance {
+        translate: [f32; 3] = "a_Translate",
+    }
+
     constant Locals {
         transform: [[f32; 4]; 4] = "u_Transform",
     }
@@ -51,6 +56,7 @@ gfx_defines!{
         out_color: gfx::RenderTarget<ColorFormat> = "Target0",
         out_depth: gfx::DepthTarget<DepthFormat> =
             gfx::preset::depth::LESS_EQUAL_WRITE,
+        instance: gfx::InstanceBuffer<Instance> = (),
     }
 }
 
@@ -64,6 +70,7 @@ impl Vertex {
 }
 
 const CLEAR_COLOR: [f32; 4] = [0.1, 0.2, 0.3, 1.0];
+const MAX_INSTANCE_COUNT: usize = 1000 * 1000;
 
 pub fn main() {
     use cgmath::{Point3, Vector3};
@@ -143,13 +150,19 @@ pub fn main() {
 
 
     let view: AffineMatrix3<f32> = Transform::look_at(
-        Point3::new(11.5f32, -15.0, 13.0),
+        Point3::new(111.5f32, -115.0, 113.0),
         Point3::new(0f32, 0.0, 0.0),
         Vector3::unit_z(),
     );
-    let proj = cgmath::perspective(cgmath::deg(45.0f32), 4.0/3.0, 1.0, 100.0);
+    let proj = cgmath::perspective(cgmath::deg(45.0f32), 4.0/3.0, 1.0, 1000.0);
 
     let proview = proj * view.mat;
+
+    // instance handling
+
+    let instance_buf = factory.create_buffer_dynamic(MAX_INSTANCE_COUNT,
+                                                     gfx::BufferRole::Vertex,
+                                                     gfx::Bind::empty()).unwrap();
 
     // data pipeline
     let data = pipe::Data {
@@ -159,6 +172,7 @@ pub fn main() {
         color: (texture_view, factory.create_sampler(sinfo)),
         out_color: main_color,
         out_depth: main_depth,
+        instance: instance_buf,
     };
 
     // ECS
@@ -183,9 +197,9 @@ pub fn main() {
         w.register::<Pos>();
         w.register::<MoveTo>();
 
-        let y_max = 10;
-        let x_max = 10;
-        let gap = 0.0;
+        let y_max = 100;
+        let x_max = 100;
+        let gap = 0.5;
         for y in 0..y_max {
             for x in 0..x_max {
                 w.create_now()
@@ -255,21 +269,20 @@ pub fn main() {
 
             //println!("Start");
             // Insert a component for each entity in sb
-            for (eid, pos) in (&entities, &poss).iter() {
-                //println!("Render {:?} {:?}", eid, pos);
-
-                use cgmath::Matrix4;
-
-                let m: Matrix4<_> = self.proview;
-                let m = m * Matrix4::from_translation(pos.0);
-
-                let locals = Locals {
-                    transform: m.into()
-                };
-                self.data.transform = m.into();
-                encoder.update_constant_buffer(&self.data.locals, &locals);
-                encoder.draw(&self.slice, &self.pso, &self.data);
+            let mut v = vec![];
+            for (_eid, pos) in (&entities, &poss).iter() {
+                v.push(Instance { translate: pos.0.into() });
             }
+            let instance_count = std::cmp::min(v.len(),
+                                               MAX_INSTANCE_COUNT);
+            let m = self.proview;
+
+            let locals = Locals { transform: m.into() };
+            self.data.transform = m.into();
+            self.slice.instances = Some((instance_count as u32, 0));
+            encoder.update_constant_buffer(&self.data.locals, &locals);
+            encoder.update_buffer(&self.data.instance, &v[..instance_count], 0).unwrap();
+            encoder.draw(&self.slice, &self.pso, &self.data);
             //println!("End");
 
 
@@ -284,7 +297,7 @@ pub fn main() {
                 (w.write::<Pos>(), w.read::<MoveTo>(), w.entities())
             });
 
-            for (eid, a, b) in (&entities, &mut poss, &move_tos).iter() {
+            for (_eid, a, b) in (&entities, &mut poss, &move_tos).iter() {
                 use cgmath::InnerSpace;
 
                 //println!("Entity @{:?}", a.0);
@@ -312,31 +325,83 @@ pub fn main() {
     }, "render", 10);
     planner.add_system(Mover, "mover", 20);
 
-    // main loop
-    'main: loop {
-        // loop over events
-        for event in window.poll_events() {
-            match event {
-                glutin::Event::KeyboardInput(
-                    _,
-                    _,
-                    Some(glutin::VirtualKeyCode::Escape)
-                )
-                | glutin::Event::Closed => break 'main,
-                _ => {},
+
+
+    struct Fps {
+        ms_accum: u32,
+        history: Vec<u32>,
+    }
+    impl Fps {
+        fn new() -> Self {
+            Fps { ms_accum: 0, history: vec![] }
+        }
+        fn frame(&mut self, time: u32) {
+            self.ms_accum += time;
+            self.history.push(time);
+
+            if self.ms_accum >= 1000 {
+                let mut min = self.history[0];
+                let mut max = self.history[0];
+                let mut average = 0;
+                let frames = self.history.len();
+
+                for e in &self.history {
+                    use std::cmp;
+                    min = cmp::min(min, *e);
+                    max = cmp::max(max, *e);
+                    average += *e;
+                }
+                let average = (average as f32) / (frames as f32);
+                let mut variance = 0.0;
+                for e in &self.history {
+                    let e = *e as f32;
+
+                    variance += (e - average) * (e - average)
+                }
+
+                println!("FPS: {}, min: {} ms, max: {} ms, avg: {} ms, var: {}",
+                         frames, min, max, average, variance);
+
+                self.ms_accum = 0;
+                self.history.clear();
             }
         }
+    }
 
-        // logic & render
-        planner.dispatch(());
-        planner.wait();
+    let mut fps = Fps::new();
 
-        let mut encoder = main_side.rx.recv().unwrap();
+    // main loop
+    let mut running = true;
+    while running {
+        use chrono::Duration;
+        let logic_render_time = Duration::span(|| {
 
-        encoder.flush(&mut device);
-        window.swap_buffers().unwrap();
-        device.cleanup();
+            // loop over events
+            for event in window.poll_events() {
+                match event {
+                    glutin::Event::KeyboardInput(
+                        _,
+                        _,
+                        Some(glutin::VirtualKeyCode::Escape)
+                    )
+                    | glutin::Event::Closed => running = false,
+                    _ => {},
+                }
+            }
 
-        main_side.tx.send(encoder).unwrap();
+            // logic & render
+            planner.dispatch(());
+            planner.wait();
+
+            let mut encoder = main_side.rx.recv().unwrap();
+
+            encoder.flush(&mut device);
+            window.swap_buffers().unwrap();
+            device.cleanup();
+
+            main_side.tx.send(encoder).unwrap();
+        }).num_milliseconds();
+
+        fps.frame(logic_render_time as u32);
     }
 }
