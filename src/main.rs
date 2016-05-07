@@ -214,7 +214,7 @@ pub fn main() {
             }
         }
 
-        specs::Planner::<()>::new(w, 4)
+        specs::Planner::new(w, 4)
     };
 
     use specs::RunArg;
@@ -257,8 +257,8 @@ pub fn main() {
         pso: gfx::PipelineState<gfx_device_gl::Resources, pipe::Meta>,
         proview: cgmath::Matrix4<f32>,
     }
-    impl specs::System<()> for Render {
-        fn run(&mut self, arg: RunArg, _: ()) {
+    impl specs::System<Context> for Render {
+        fn run(&mut self, arg: RunArg, _: Context) {
             let (poss, entities) = arg.fetch(|w| {
                 (w.read::<Pos>(), w.entities())
             });
@@ -292,8 +292,8 @@ pub fn main() {
     }
 
     struct Mover;
-    impl specs::System<()> for Mover {
-        fn run(&mut self, arg: RunArg, _: ()) {
+    impl specs::System<Context> for Mover {
+        fn run(&mut self, arg: RunArg, _: Context) {
             let (mut poss, move_tos, entities) = arg.fetch(|w| {
                 (w.write::<Pos>(), w.read::<MoveTo>(), w.entities())
             });
@@ -371,12 +371,110 @@ pub fn main() {
 
     let mut fps = Fps::new();
 
+    #[derive(Clone)]
+    struct Context;
+
+    use glutin::ElementState;
+    use chrono::Duration;
+    use cgmath::Vector2;
+    use cgmath::InnerSpace;
+    type Vec2f = Vector2<f32>;
+
+    struct CameraController {
+        wasdqe: [ElementState; 6],
+        pos_delta: Vec2f,
+        rot_delta: f32,
+        zoom_delta: f32,
+        frame_reset: bool,
+    }
+
+    impl CameraController {
+        fn handle(&mut self, event: &glutin::Event) {
+            if self.frame_reset {
+                self.frame_reset = false;
+                self.zoom_delta = 0.0;
+            }
+
+            match *event {
+                glutin::Event::KeyboardInput(
+                    s, _, Some(glutin::VirtualKeyCode::W)) => self.wasdqe[0] = s,
+                glutin::Event::KeyboardInput(
+                    s, _, Some(glutin::VirtualKeyCode::A)) => self.wasdqe[1] = s,
+                glutin::Event::KeyboardInput(
+                    s, _, Some(glutin::VirtualKeyCode::S)) => self.wasdqe[2] = s,
+                glutin::Event::KeyboardInput(
+                    s, _, Some(glutin::VirtualKeyCode::D)) => self.wasdqe[3] = s,
+                glutin::Event::KeyboardInput(
+                    s, _, Some(glutin::VirtualKeyCode::Q)) => self.wasdqe[4] = s,
+                glutin::Event::KeyboardInput(
+                    s, _, Some(glutin::VirtualKeyCode::E)) => self.wasdqe[5] = s,
+                glutin::Event::MouseWheel(d, _) => match d {
+                    glutin::MouseScrollDelta::LineDelta(_, s) | glutin::MouseScrollDelta::PixelDelta(_, s) => {
+                        if s > 0.0 {
+                            self.zoom_delta = 1.0;
+                        } else if s < 0.0 {
+                            self.zoom_delta = - 1.0;
+                        }
+                    }
+                },
+                _ => return,
+            }
+        }
+
+        fn update(&mut self) {
+            let mut mouse_delta = Vec2f::new(0.0, 0.0);
+            let mut mouse_rot = 0.0;
+
+            match self.wasdqe[0] {
+                ElementState::Pressed => mouse_delta += Vec2f::new(0.0, 1.0),
+                _ => (),
+            }
+            match self.wasdqe[1] {
+                ElementState::Pressed => mouse_delta += Vec2f::new(-1.0, 0.0),
+                _ => (),
+            }
+            match self.wasdqe[2] {
+                ElementState::Pressed => mouse_delta += Vec2f::new(0.0, -1.0),
+                _ => (),
+            }
+            match self.wasdqe[3] {
+                ElementState::Pressed => mouse_delta += Vec2f::new(1.0, 0.0),
+                _ => (),
+            }
+            match self.wasdqe[4] {
+                ElementState::Pressed => mouse_rot += 1.0,
+                _ => (),
+            }
+            match self.wasdqe[5] {
+                ElementState::Pressed => mouse_rot += -1.0,
+                _ => (),
+            }
+
+            if mouse_delta.magnitude() != 0.0 {
+                mouse_delta = mouse_delta.normalize();
+            }
+            self.pos_delta = mouse_delta;
+            self.rot_delta = mouse_rot;
+
+            println!("d: {:?} r: {:?} z: {:?}",
+                     self.pos_delta, self.rot_delta, self.zoom_delta);
+
+            self.frame_reset = true;
+        }
+    }
+
+    let mut cam = CameraController {
+        wasdqe: [ElementState::Released; 6],
+        pos_delta: Vec2f::new(0.0, 0.0),
+        rot_delta: 0.0,
+        zoom_delta: 0.0,
+        frame_reset: true,
+    };
+
     // main loop
     let mut running = true;
     while running {
-        use chrono::Duration;
         let logic_render_time = Duration::span(|| {
-
             // loop over events
             for event in window.poll_events() {
                 match event {
@@ -388,10 +486,13 @@ pub fn main() {
                     | glutin::Event::Closed => running = false,
                     _ => {},
                 }
+                cam.handle(&event);
             }
 
+            cam.update();
+
             // logic & render
-            planner.dispatch(());
+            planner.dispatch(Context);
             planner.wait();
 
             let mut encoder = main_side.rx.recv().unwrap();
