@@ -139,7 +139,8 @@ pub fn main() {
     // vertex buffer
     let (vbuf, slice) = factory.create_vertex_buffer_with_slice(&vertex_data, index_data);
 
-    let texels = [[0x20, 0x60, 0x30, 0x00]];
+    //let texels = [[0x20, 0x60, 0x30, 0x00]];
+    let texels = [[0x50, 0x50, 0x50, 0x00]];
     let (_, texture_view) = factory.create_texture_const::<gfx::format::Rgba8>(
         gfx::tex::Kind::D2(1, 1, gfx::tex::AaMode::Single), &[&texels]
         ).unwrap();
@@ -199,7 +200,7 @@ pub fn main() {
 
         let y_max = 100;
         let x_max = 100;
-        let gap = 0.5;
+        let gap = 0.0;
         for y in 0..y_max {
             for x in 0..x_max {
                 w.create_now()
